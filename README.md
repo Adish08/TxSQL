@@ -1,133 +1,127 @@
-# TxSQL - Termux SQL Auto-Installer
+# TxSQL (SquillMux): MariaDB on Termux in one command
 
-A simple, automated Bash script to set up **MariaDB (MySQL)** on Termux Android. This script handles installation, database initialization, and creates a convenient shortcut (`startsql`) to manage the server and client connection in one go.
-
----
-
-## 🚀 Features
-
-* **Auto-Update:** Automatically updates and upgrades Termux packages.
-* **Installation:** Installs the latest stable version of MariaDB.
-* **Initialization:** Runs `mysql_install_db` to set up the default data directory (only if not already present).
-* **Shortcut Creation:** Adds a permanent `startsql` alias to your `.bashrc`.
-* **Smart Launch:** The `startsql` command checks if the server is already running to prevent *"Address already in use"* errors.
+Installs and configures **MariaDB (MySQL-compatible)** on Termux (Android) and gives you three simple commands: `startsql`, `stopsql` and `sqlpasswd`.
 
 ---
 
-## 📋 Prerequisites
+## 🛠 Install
 
-* **Termux App:** Use the F-Droid version of Termux (Play Store version is deprecated).
-* **Internet Connection:** Required to download packages.
-
----
-
-## 🛠 Installation
-
-Set up everything with a single command. Open Termux and run:
+Open Termux and type:
 
 ```bash
-pkg install curl -y && bash <(curl -fsSL https://raw.githubusercontent.com/Adish08/TxSQL/refs/heads/main/setup.sh)
+curl -fsSL https://is.gd/txsql | bash
 ```
 
-### What this command does:
-
-* Installs `curl` (if missing).
-* Downloads the `setup.sh` script from the repository.
-* Executes the script immediately.
-
----
-
-## 💻 Usage
-
-After the installation script completes, you’ll see a success message.
-
-### 1. Reload Shell
-
-To activate the new command instantly:
+Then reload the shell:
 
 ```bash
 source ~/.bashrc
 ```
 
-(Or simply close and reopen Termux)
+(or close and reopen Termux)
 
-### 2. Start SQL
+**Prerequisites**
 
-Use the single-word command:
+- Termux from **F-Droid** (the Play Store version is outdated).
+- Internet connection and roughly 200 MB free space.
+
+The script is safe to re-run. It never deletes an existing database.
+
+Want to read the script before running it?
 
 ```bash
-startsql
+curl -fsSL https://is.gd/txsql | less
 ```
-
-### Behavior of `startsql`:
-
-* **If server is stopped:** Starts `mysqld_safe` in the background, waits 4 seconds, then logs you in.
-* **If server is running:** Skips startup and logs you in directly.
-* **Default Login:** User `root`, password prompt (usually empty — press Enter).
 
 ---
 
-## 🔍 What the Script Does (Under the Hood)
+## 💻 Daily use
 
-The `setup.sh` script performs:
+| Command | What it does |
+|---|---|
+| `startsql` | Starts the server (if needed) and opens the SQL prompt |
+| `sqlpasswd` | Sets or changes the root password (no SQL typing needed) |
+| `stopsql` | Stops the server |
 
-* **System Update:** Runs `pkg update && pkg upgrade`.
-* **Package Install:** Installs MariaDB.
-* **Database Setup:** Checks for `$PREFIX/var/lib/mysql/mysql`; if missing, performs initialization.
-* **Bash Config:** Appends the `startsql` function to your `~/.bashrc`.
+### ⚠️ Know your two prompts
+
+This is the most common mistake.
+
+| Prompt looks like | Where you are | What to type |
+|---|---|---|
+| `~ $` | Termux (bash) | Commands like `startsql`, `ls` |
+| `MariaDB [(none)]>` | Inside MariaDB | SQL such as `SHOW DATABASES;` |
+
+If you type SQL at the `~ $` prompt you will see `bash: syntax error near unexpected token '('`. Nothing is broken. Run `startsql` first, wait for the `MariaDB [(none)]>` prompt, and type SQL there. To leave MariaDB, type `exit`.
+
+### First login
+
+1. Type `startsql`.
+2. At `Enter password:` just press **Enter** (no password is set on a fresh install).
+3. Try: `SHOW DATABASES;`
+4. Type `exit` to return to Termux.
 
 ---
 
-## 🔐 Setting a Password in MariaDB
+## 🔐 Set a root password
 
-After installation, you can secure your MariaDB setup by setting a root password.
-
-### 1. Start the SQL Server
-
-Make sure MariaDB is running:
+Easiest way, from the normal `~ $` prompt:
 
 ```bash
-startsql
+startsql      # start the server, then type: exit
+sqlpasswd     # type the new password twice
 ```
 
-(Logs you into the MariaDB shell)
+Next time `startsql` will ask for that password.
 
-### 2. Set the Root Password
-
-Inside the MariaDB prompt, run:
+**Manual way** (only at the `MariaDB [(none)]>` prompt, not in bash):
 
 ```sql
-SET PASSWORD FOR 'root'@'localhost' = PASSWORD('your_password_here');
-```
-
-Replace `your_password_here` with your desired password.
-
-### 3. Apply Privileges
-
-```sql
+ALTER USER 'root'@'localhost' IDENTIFIED BY 'your_password_here';
 FLUSH PRIVILEGES;
 ```
 
-### 4. Exit
+Don't use a real or reused password when your screen is projected or shared.
 
-```sql
-EXIT;
-```
+---
 
-### 5. Log In with Password
+## 🧯 Troubleshooting
 
-Next time you use:
+| You see | Meaning | Fix |
+|---|---|---|
+| `bash: syntax error near unexpected token '('` | SQL typed at the `~ $` prompt | Run `startsql` and type SQL at `MariaDB [(none)]>` |
+| `curl: (22) ... error: 500` (or any `curl` error) | Download failed before the script ran | Check the URL for typos (it is `https://is.gd/txsql`) and your internet, then retry |
+| `Server did not start` | MariaDB could not launch | Read `$PREFIX/tmp/txsql.log`, then try `stopsql` and `startsql` again |
+| `Access denied for user 'root'` | Wrong password, or an older install | Try an empty password (Enter). On an old install, try plain `mysql` as your Termux user |
+| `Can't connect to local server` | Server is not running | Run `startsql` |
+| Install fails midway | Repo or network hiccup | Run `pkg update`, then run the install command again |
+
+If the database is broken and you don't need its data, you can start fresh. **This deletes all databases:**
 
 ```bash
-startsql
+stopsql
+rm -rf $PREFIX/var/lib/mysql/*
+curl -fsSL https://is.gd/txsql | bash
 ```
 
-It will prompt for the password you set.
+---
+
+## 🔍 What the script does
+
+1. Checks it is running in Termux as a normal user.
+2. Runs `pkg update` and upgrades packages without interactive prompts, then installs MariaDB.
+3. Initialises the data directory only if it does not exist yet, with an empty root password so the first login works.
+4. Writes `~/.txsql.sh` (the commands above) and loads it from `~/.bashrc`. This file is refreshed on every run, so re-running the installer updates your commands.
+
+Notes:
+
+- `startsql` checks whether the server is already running, so you don't get "address already in use" errors.
+- The server runs in the background, and its log is at `$PREFIX/tmp/txsql.log`.
 
 ---
 
 ## 🤝 Contributing
 
-Feel free to fork the repository and submit pull requests with improvements.
+Fork the repository and send a pull request with improvements.
 
 **Maintained by *Adish08***
