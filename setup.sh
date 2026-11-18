@@ -1,493 +1,291 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ==============================================================================
-# TxSQL - MariaDB Auto-Installer & Helper Suite for Termux
-# Repository : https://github.com/Adish08/TxSQL
-# Short Link : https://adish.sagarawat.in/txsql
-# Maintainer : Adish08
+# TxSQL - MariaDB installer & helper commands for Termux
+# Repo    : https://github.com/Adish08/TxSQL
+# Install : curl -fsSL https://adish.sagarawat.in/txsql | bash
+# Commands: startsql  stopsql  sqlstatus  sqlpass  sqlreset  sqluninstall
+# Safe to re-run: existing databases are never touched.
 # ==============================================================================
-# Wrapped in a main function so `curl -fsSL https://adish.sagarawat.in/txsql | bash`
-# never executes a partially downloaded script and never has stdin consumed
-# by child processes like apt/dpkg.
+# Everything is inside one function that is called on the last line, so a
+# half-downloaded script never runs and child commands cannot eat our stdin.
 
 txsql_install_main() {
     set -u
 
-    # --- Colours ---
-    local RED='\033[0;31m'
-    local GREEN='\033[0;32m'
-    local YELLOW='\033[1;33m'
-    local CYAN='\033[0;36m'
-    local BOLD='\033[1m'
-    local NC='\033[0m'
-
-    # --- Helper Print Functions ---
-    info()  { printf "${CYAN}[INFO]${NC} %s\n" "$*"; }
-    step()  { printf "\n${GREEN}${BOLD}==> %s${NC}\n" "$*"; }
-    warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*" >&2; }
-    err()   { printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; }
-    die()   { err "$*"; exit 1; }
-
-    printf "${CYAN}=========================================================${NC}\n"
-    printf "${CYAN}${BOLD}  TxSQL (Adish08) - MariaDB Installer for Termux     ${NC}\n"
-    printf "${CYAN}=========================================================${NC}\n"
-
-    # --- 1. Environment & Pre-flight Checks ---
-    step "[1/5] Checking Termux environment..."
-
-    if [ -z "${PREFIX:-}" ] || [ ! -d "${PREFIX:-}" ]; then
-        die "This script must be run inside Termux on Android (\$PREFIX is missing)."
-    fi
-
-    if [ "$(id -u)" -eq 0 ]; then
-        die "Do NOT run TxSQL as root (su/sudo/tsu). Run it as your normal Termux user."
-    fi
-
-    # Check free storage space (require at least 250 MB free in $PREFIX)
-    local free_kb=0
-    free_kb=$(df -k "$PREFIX" 2>/dev/null | awk 'NR==2 {print $4}')
-    if [ -n "$free_kb" ] && [ "$free_kb" -lt 256000 ] 2>/dev/null; then
-        warn "Low free storage detected ($((free_kb / 1024)) MB available)."
-        warn "MariaDB requires around 250 MB of free space. Installation may fail."
-    fi
-
-    # --- 2. Package Update & MariaDB Installation ---
-    step "[2/5] Updating repositories and installing MariaDB..."
-    info "This may take a few minutes depending on your internet speed."
-
-    export DEBIAN_FRONTEND=noninteractive
-    local APT_FLAGS=(
-        -y
-        -o Dpkg::Options::="--force-confdef"
-        -o Dpkg::Options::="--force-confold"
-    )
-
-    if ! pkg update -y </dev/null; then
-        err "Failed to update Termux package lists."
-        info "Tip 1: Check your internet connection."
-        info "Tip 2: Run 'termux-change-repo' to switch to a working mirror, then try again."
-        exit 1
-    fi
-
-    if ! apt-get upgrade "${APT_FLAGS[@]}" </dev/null; then
-        warn "Package upgrade reported an issue; attempting MariaDB install directly..."
-    fi
-
-    if ! apt-get install "${APT_FLAGS[@]}" mariadb </dev/null; then
-        err "Failed to install the 'mariadb' package."
-        info "Try running: termux-change-repo"
-        info "Then re-run: curl -fsSL https://adish.sagarawat.in/txsql | bash"
-        exit 1
-    fi
-
-    # --- 3. Resolve MariaDB Binary Names & Directories ---
-    step "[3/5] Configuring directories and database data..."
-
-    local DATADIR="$PREFIX/var/lib/mysql"
-    local RUNDIR="$PREFIX/var/run/mysqld"
-    local LOGFILE="$DATADIR/txsql-error.log"
-
-    mkdir -p "$PREFIX/etc/my.cnf.d" "$RUNDIR"
-
-    local INSTALL_DB_BIN=""
-    if command -v mariadb-install-db >/dev/null 2>&1; then
-        INSTALL_DB_BIN="mariadb-install-db"
-    elif command -v mysql_install_db >/dev/null 2>&1; then
-        INSTALL_DB_BIN="mysql_install_db"
-    else
-        die "Could not find 'mariadb-install-db' or 'mysql_install_db' after installation."
-    fi
-
-    local CLIENT_BIN=""
-    if command -v mariadb >/dev/null 2>&1; then
-        CLIENT_BIN="mariadb"
-    elif command -v mysql >/dev/null 2>&1; then
-        CLIENT_BIN="mysql"
-    else
-        die "Could not find 'mariadb' or 'mysql' client binary."
-    fi
-
-    local ADMIN_BIN=""
-    if command -v mariadb-admin >/dev/null 2>&1; then
-        ADMIN_BIN="mariadb-admin"
-    elif command -v mysqladmin >/dev/null 2>&1; then
-        ADMIN_BIN="mysqladmin"
-    else
-        die "Could not find 'mariadb-admin' or 'mysqladmin' binary."
-    fi
-
-    local SAFE_BIN=""
-    if command -v mariadbd-safe >/dev/null 2>&1; then
-        SAFE_BIN="mariadbd-safe"
-    elif command -v mysqld_safe >/dev/null 2>&1; then
-        SAFE_BIN="mysqld_safe"
-    else
-        die "Could not find 'mariadbd-safe' or 'mysqld_safe' binary."
-    fi
-
-    # Initialise system tables only if not already present (never overwrite user data)
-    if [ ! -d "$DATADIR/mysql" ]; then
-        info "Initialising fresh MariaDB data directory at $DATADIR..."
-        mkdir -p "$DATADIR"
-        if ! "$INSTALL_DB_BIN" --user="$(whoami)" --auth-root-authentication-method=normal --datadir="$DATADIR" </dev/null >/dev/null 2>&1; then
-            warn "Standard init flag failed; retrying fallback initialisation..."
-            if ! "$INSTALL_DB_BIN" --datadir="$DATADIR" </dev/null; then
-                die "Database initialisation failed. Check storage space or run 'sqlreset' later."
-            fi
-        fi
-        info "Fresh database initialised successfully."
-    else
-        info "Existing database directory found at $DATADIR (preserving all user data)."
-    fi
-
-    # --- 4. Verify Server Startup & Repair Legacy Socket-Locked 'root' Accounts ---
-    step "[4/5] Verifying MariaDB server and root login compatibility..."
-
-    # Start server if not currently responding
-    if ! "$ADMIN_BIN" ping --silent >/dev/null 2>&1; then
-        info "Starting MariaDB server for verification..."
-        (nohup "$SAFE_BIN" --datadir="$DATADIR" >"$LOGFILE" 2>&1 </dev/null &)
-        local waited=0
-        while ! "$ADMIN_BIN" ping --silent >/dev/null 2>&1; do
-            sleep 1
-            waited=$((waited + 1))
-            if [ "$waited" -ge 30 ]; then
-                err "MariaDB server did not start within 30 seconds."
-                [ -f "$LOGFILE" ] && tail -n 15 "$LOGFILE" >&2
-                die "Check the log above or at: $LOGFILE"
-            fi
-        done
-    fi
-
-    # Check if root can log in without password.
-    # If not, check if this is an older install where $(whoami) has passwordless socket access,
-    # and repair 'root'@'localhost' so beginners don't get 'Access denied' on fresh/legacy installs.
-    if "$CLIENT_BIN" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-        info "Account 'root'@'localhost' is ready (no password currently set)."
-    else
-        local os_user
-        os_user="$(whoami)"
-        if "$CLIENT_BIN" -u "$os_user" --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-            info "Detected legacy socket authentication via '$os_user'. Checking if root needs repair..."
-            # Only repair if root currently has no password string set (e.g. unix_socket lock)
-            local root_repair_sql="
-                ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('');
-                GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
-                FLUSH PRIVILEGES;
-            "
-            if "$CLIENT_BIN" -u "$os_user" -e "SELECT 1 FROM mysql.global_priv WHERE User='root' AND Host='localhost' AND (JSON_VALUE(Priv, '$.authentication_string') = '' OR JSON_VALUE(Priv, '$.authentication_string') IS NULL);" 2>/dev/null | grep -q 1; then
-                if "$CLIENT_BIN" -u "$os_user" -e "$root_repair_sql" >/dev/null 2>&1; then
-                    info "Repaired legacy 'root'@'localhost' login automatically."
-                fi
-            else
-                info "Account 'root'@'localhost' is protected by your existing password."
-            fi
-        else
-            info "Account 'root'@'localhost' is already password-protected (keeping existing password)."
-        fi
-    fi
-
-    # --- 5. Install Helper Commands (`~/.txsql.sh`) & Update Shell RC ---
-    step "[5/5] Installing TxSQL commands (startsql, stopsql, sqlpass, sqlstatus, sqlreset, sqluninstall)..."
+    [ -n "${PREFIX:-}" ] && [ -d "$PREFIX" ] || { echo "[ERROR] Run this inside Termux on Android."; exit 1; }
+    [ "$(id -u)" -ne 0 ] || { echo "[ERROR] Do not run as root. Use your normal Termux user."; exit 1; }
 
     local TXSQL_FILE="$HOME/.txsql.sh"
     local BASHRC="$HOME/.bashrc"
 
+    # ---- Helper commands: written first, then reused by this installer -------
     cat << 'EOF' > "$TXSQL_FILE"
-# ==============================================================================
-# ~/.txsql.sh - Managed by TxSQL (https://github.com/Adish08/TxSQL)
-# Do not edit manually; re-running the installer refreshes this file.
-# ==============================================================================
+# ~/.txsql.sh - managed by TxSQL. Re-running the installer refreshes this file.
 
-_txsql_bins() {
-    if command -v mariadb >/dev/null 2>&1; then _TX_CLIENT="mariadb"; else _TX_CLIENT="mysql"; fi
-    if command -v mariadb-admin >/dev/null 2>&1; then _TX_ADMIN="mariadb-admin"; else _TX_ADMIN="mysqladmin"; fi
-    if command -v mariadbd-safe >/dev/null 2>&1; then _TX_SAFE="mariadbd-safe"; else _TX_SAFE="mysqld_safe"; fi
-    if command -v mariadb-install-db >/dev/null 2>&1; then _TX_INIT="mariadb-install-db"; else _TX_INIT="mysql_install_db"; fi
-    _TX_DATADIR="${PREFIX}/var/lib/mysql"
-    _TX_LOG="${_TX_DATADIR}/txsql-error.log"
+_TX_URL="https://adish.sagarawat.in/txsql"  
+_TX_R=$'\033[0;31m'; _TX_G=$'\033[0;32m'; _TX_Y=$'\033[1;33m'
+_TX_C=$'\033[0;36m'; _TX_B=$'\033[1m';    _TX_N=$'\033[0m'
+
+_tx_info() { printf '%s[INFO]%s %s\n' "$_TX_C" "$_TX_N" "$*"; }
+_tx_ok()   { printf '%s✔ %s%s\n' "$_TX_G" "$*" "$_TX_N"; }
+_tx_warn() { printf '%s[WARN]%s %s\n' "$_TX_Y" "$_TX_N" "$*" >&2; }
+_tx_err()  { printf '%s[ERROR]%s %s\n' "$_TX_R" "$_TX_N" "$*" >&2; }
+_tx_step() { printf '\n%s%s==> %s%s\n' "$_TX_G" "$_TX_B" "$*" "$_TX_N"; }
+
+# Find the MariaDB programs (new names first, old names as fallback)
+_tx_bins() {
+    _TX_CLIENT=$(command -v mariadb || command -v mysql)
+    _TX_ADMIN=$(command -v mariadb-admin || command -v mysqladmin)
+    _TX_SAFE=$(command -v mariadbd-safe || command -v mysqld_safe)
+    _TX_INIT=$(command -v mariadb-install-db || command -v mysql_install_db)
+    _TX_DATADIR="$PREFIX/var/lib/mysql"
+    _TX_LOG="$_TX_DATADIR/txsql-error.log"
+    [ -n "$_TX_CLIENT" ] && [ -n "$_TX_ADMIN" ] && [ -n "$_TX_SAFE" ] && [ -n "$_TX_INIT" ] \
+        || { _tx_err "MariaDB is not installed. Run: curl -fsSL $_TX_URL | bash"; return 1; }
 }
 
-_txsql_is_running() {
-    _txsql_bins
-    "$_TX_ADMIN" ping --silent >/dev/null 2>&1
-}
+_tx_up()      { "$_TX_ADMIN" ping --silent >/dev/null 2>&1; }
+_tx_root_ok() { "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; }
 
-_txsql_ensure_server() {
-    _txsql_bins
-    mkdir -p "${PREFIX}/etc/my.cnf.d" "${PREFIX}/var/run/mysqld"
-
-    if [ ! -d "${_TX_DATADIR}/mysql" ]; then
-        printf "\033[1;33m[WARN]\033[0m Database directory missing. Initialising now...\n"
-        mkdir -p "$_TX_DATADIR"
-        "$_TX_INIT" --user="$(whoami)" --auth-root-authentication-method=normal --datadir="$_TX_DATADIR" >/dev/null 2>&1 || \
-            "$_TX_INIT" --datadir="$_TX_DATADIR" >/dev/null 2>&1
-    fi
-
-    if _txsql_is_running; then
-        printf "\033[0;32m✔ MariaDB server is already running.\033[0m\n"
+# Create a fresh, empty database (root has no password)
+_tx_init_db() {
+    local initlog="$PREFIX/tmp/txsql-init.log"
+    mkdir -p "$_TX_DATADIR" "$PREFIX/etc/my.cnf.d" "$PREFIX/var/run/mysqld"
+    if "$_TX_INIT" --user="$(whoami)" --auth-root-authentication-method=normal --datadir="$_TX_DATADIR" </dev/null >"$initlog" 2>&1 \
+       || "$_TX_INIT" --datadir="$_TX_DATADIR" </dev/null >>"$initlog" 2>&1; then
         return 0
     fi
+    _tx_err "Database initialisation failed. Check free storage. Details: $initlog"
+    return 1
+}
 
-    printf "\033[0;36m➤ Starting MariaDB server...\033[0m\n"
-    if command -v termux-wake-lock >/dev/null 2>&1; then
-        termux-wake-lock >/dev/null 2>&1 || true
-    fi
+# Start the server if it is not already running
+_tx_ensure_server() {
+    _tx_bins || return 1
+    [ -d "$_TX_DATADIR/mysql" ] || { _tx_warn "Database missing, initialising..."; _tx_init_db || return 1; }
+    mkdir -p "$PREFIX/var/run/mysqld"
+    if _tx_up; then _tx_ok "MariaDB server is already running."; return 0; fi
 
+    printf '%s➤ Starting MariaDB server...%s\n' "$_TX_C" "$_TX_N"
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1
     (nohup "$_TX_SAFE" --datadir="$_TX_DATADIR" >"$_TX_LOG" 2>&1 </dev/null &)
 
     local i=0
-    while ! _txsql_is_running; do
-        sleep 1
-        i=$((i + 1))
+    until _tx_up; do
+        sleep 1; i=$((i + 1))
         if [ "$i" -ge 30 ]; then
-            printf "\033[0;31m✖ Error: MariaDB server failed to start within 30 seconds.\033[0m\n" >&2
-            if [ -f "$_TX_LOG" ]; then
-                printf "Last lines of error log (%s):\n" "$_TX_LOG" >&2
-                tail -n 10 "$_TX_LOG" >&2
-            fi
+            _tx_err "Server did not start within 30 seconds. Last log lines:"
+            tail -n 10 "$_TX_LOG" >&2 2>/dev/null
             return 1
         fi
     done
-    printf "\033[0;32m✔ MariaDB server started.\033[0m\n"
-    return 0
+    _tx_ok "MariaDB server started."
+}
+
+# Stop the server without a password prompt; returns 0 when it is down
+_tx_stop_server() {
+    _tx_up || return 0
+    "$_TX_ADMIN" -u root shutdown >/dev/null 2>&1 || "$_TX_ADMIN" -u "$(whoami)" shutdown >/dev/null 2>&1
+    local i=0
+    while _tx_up && [ "$i" -lt 10 ]; do sleep 1; i=$((i + 1)); done
+    if _tx_up && command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -x mariadbd 2>/dev/null || pkill -TERM -x mysqld 2>/dev/null
+        sleep 3
+        _tx_up && { pkill -KILL -x mariadbd 2>/dev/null || pkill -KILL -x mysqld 2>/dev/null; sleep 1; }
+    fi
+    ! _tx_up
+}
+
+# Make sure root can log in without a password if it has none (fixes old,
+# socket-locked installs). Returns 0 if root works passwordless afterwards.
+_tx_repair_root() {
+    _tx_root_ok && return 0
+    local u; u="$(whoami)"
+    "$_TX_CLIENT" -u "$u" --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1 || return 1
+    "$_TX_CLIENT" -u "$u" -e "SELECT 1 FROM mysql.global_priv WHERE User='root' AND Host='localhost' AND (JSON_VALUE(Priv, '\$.authentication_string') = '' OR JSON_VALUE(Priv, '\$.authentication_string') IS NULL);" 2>/dev/null | grep -q 1 || return 1
+    "$_TX_CLIENT" -u "$u" -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD(''); GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>&1
+    _tx_root_ok
 }
 
 startsql() {
-    _txsql_ensure_server || return 1
-
-    printf "\033[0;36m➤ Connecting to MariaDB as 'root'...\033[0m\n"
-    printf "  (Tip: Type \033[1mEXIT;\033[0m to leave SQL. Do not type EXIT again at '\033[1m~ $\033[0m' or Termux will close.)\n\n"
-
-    # Try passwordless root login first so fresh installs never stall on an empty password prompt
-    if "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
+    _tx_ensure_server || return 1
+    printf '%s➤ Connecting to MariaDB as root...%s\n' "$_TX_C" "$_TX_N"
+    printf "  Tip: type %sEXIT;%s to leave SQL. Typing exit again at '~ \$' closes Termux.\n\n" "$_TX_B" "$_TX_N"
+    if _tx_repair_root; then
         "$_TX_CLIENT" -u root
         return $?
     fi
-
-    # Fallback: check if legacy OS user can auto-repair an empty/socket-locked root account
-    local os_user
-    os_user="$(whoami)"
-    if "$_TX_CLIENT" -u "$os_user" --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-        if "$_TX_CLIENT" -u "$os_user" -e "SELECT 1 FROM mysql.global_priv WHERE User='root' AND Host='localhost' AND (JSON_VALUE(Priv, '$.authentication_string') = '' OR JSON_VALUE(Priv, '$.authentication_string') IS NULL);" 2>/dev/null | grep -q 1; then
-            "$_TX_CLIENT" -u "$os_user" -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD(''); GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>&1
-            if "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-                "$_TX_CLIENT" -u root
-                return $?
-            fi
-        fi
-    fi
-
-    # Password is set on root
-    printf "\033[1;33m🔒 Password required for 'root'@'localhost'.\033[0m\n"
-    printf "   (Characters will not appear while typing. Forgot it? Run \033[1msqlreset\033[0m to wipe and start fresh.)\n"
+    printf '%s🔒 Password required for root.%s (Typing is invisible. Forgot it? Run %ssqlreset%s)\n' "$_TX_Y" "$_TX_N" "$_TX_B" "$_TX_N"
     "$_TX_CLIENT" -u root -p
 }
 
 stopsql() {
-    _txsql_bins
-    if ! _txsql_is_running; then
-        printf "\033[1;33mℹ MariaDB server is not running.\033[0m\n"
-        return 0
-    fi
-    printf "\033[0;36m➤ Stopping MariaDB server...\033[0m\n"
-    if "$_TX_ADMIN" -u root shutdown >/dev/null 2>&1; then
-        printf "\033[0;32m✔ MariaDB server stopped cleanly.\033[0m\n"
-        return 0
-    fi
-    # If root requires a password, try clean SIGTERM on mariadbd/mysqld
-    pkill -TERM -x mariadbd 2>/dev/null || pkill -TERM -x mysqld 2>/dev/null || true
-    local i=0
-    while _txsql_is_running && [ "$i" -lt 10 ]; do
-        sleep 1
-        i=$((i + 1))
-    done
-    if _txsql_is_running; then
-        printf "\033[1;33mRoot password required to shut down cleanly:\033[0m\n"
-        "$_TX_ADMIN" -u root -p shutdown
+    _tx_bins || return 1
+    _tx_up || { printf '%sℹ MariaDB server is not running.%s\n' "$_TX_Y" "$_TX_N"; return 0; }
+    printf '%s➤ Stopping MariaDB server...%s\n' "$_TX_C" "$_TX_N"
+    if _tx_stop_server; then
+        _tx_ok "MariaDB server stopped."
     else
-        printf "\033[0;32m✔ MariaDB server stopped.\033[0m\n"
+        printf '%sRoot password needed to stop it:%s\n' "$_TX_Y" "$_TX_N"
+        "$_TX_ADMIN" -u root -p shutdown
     fi
 }
 
 sqlstatus() {
-    _txsql_bins
-    if _txsql_is_running; then
-        printf "\033[0;32m✔ MariaDB server is RUNNING.\033[0m\n"
-        "$_TX_ADMIN" version 2>/dev/null || true
+    _tx_bins || return 1
+    if _tx_up; then
+        _tx_ok "MariaDB server is RUNNING."
+        "$_TX_ADMIN" version 2>/dev/null
     else
-        printf "\033[1;33m✖ MariaDB server is STOPPED.\033[0m (Run \033[1mstartsql\033[0m to start it)\n"
+        printf '%s✖ MariaDB server is STOPPED.%s Run %sstartsql%s to start it.\n' "$_TX_Y" "$_TX_N" "$_TX_B" "$_TX_N"
     fi
 }
 
 sqlpass() {
-    _txsql_ensure_server || return 1
-    printf "\n\033[0;36m=== Set or Change MariaDB 'root' Password ===\033[0m\n"
-    printf "Note: In a classroom or on a projector, do NOT use your personal password.\n\n"
+    _tx_ensure_server || return 1
+    printf '\n%s=== Set, change or remove the MariaDB root password ===%s\n' "$_TX_C" "$_TX_N"
+    echo "Classroom tip: do not use a real password on a shared screen."
 
-    local auth_args=(-u root)
-    local cur_pass=""
-    if ! "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-        printf "Enter CURRENT root password: "
-        IFS= read -rs cur_pass
-        printf "\n"
-        if ! MYSQL_PWD="$cur_pass" "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
-            printf "\033[0;31m✖ Error: Current password is incorrect.\033[0m\n" >&2
-            printf "  (If you forgot your password and want to wipe all databases, run: \033[1msqlreset\033[0m)\n" >&2
+    local cur="" new="" again="" esc sql
+    if ! _tx_repair_root; then
+        printf "Enter CURRENT root password: "; IFS= read -rs cur; printf '\n'
+        if ! MYSQL_PWD="$cur" "$_TX_CLIENT" -u root --connect-timeout=5 -e "SELECT 1;" >/dev/null 2>&1; then
+            _tx_err "Current password is incorrect."
+            echo "  Forgot it? 'sqlreset' wipes all databases and starts fresh."
             return 1
         fi
     fi
 
-    local new_pass=""
-    local confirm_pass=""
-    printf "Enter NEW root password (leave empty and press Enter to remove password): "
-    IFS= read -rs new_pass
-    printf "\n"
-    printf "Confirm NEW root password: "
-    IFS= read -rs confirm_pass
-    printf "\n"
+    printf "Enter NEW password (leave empty to remove the password): "; IFS= read -rs new; printf '\n'
+    printf "Confirm NEW password: "; IFS= read -rs again; printf '\n'
+    [ "$new" = "$again" ] || { _tx_err "Passwords do not match. Nothing was changed."; return 1; }
 
-    if [ "$new_pass" != "$confirm_pass" ]; then
-        printf "\033[0;31m✖ Error: Passwords do not match. Nothing was changed.\033[0m\n" >&2
-        return 1
-    fi
+    # escape backslashes and single quotes for the SQL string
+    esc=$(printf '%s' "$new" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g")
+    sql="ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${esc}'); FLUSH PRIVILEGES;"
 
-    # Escape single quotes and backslashes safely for SQL literal
-    local escaped_pass
-    escaped_pass=$(printf "%s" "$new_pass" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g")
-
-    local sql_cmd="ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${escaped_pass}'); FLUSH PRIVILEGES;"
-    if [ -n "$cur_pass" ]; then
-        MYSQL_PWD="$cur_pass" "$_TX_CLIENT" "${auth_args[@]}" -e "$sql_cmd"
+    if MYSQL_PWD="$cur" "$_TX_CLIENT" -u root -e "$sql"; then
+        if [ -z "$new" ]; then _tx_ok "Password removed. startsql will log you in automatically."
+        else _tx_ok "Root password updated. startsql will now ask for it."; fi
     else
-        "$_TX_CLIENT" "${auth_args[@]}" -e "$sql_cmd"
-    fi
-
-    if [ $? -eq 0 ]; then
-        if [ -z "$new_pass" ]; then
-            printf "\033[0;32m✔ Password removed! 'startsql' will now log you in automatically.\033[0m\n"
-        else
-            printf "\033[0;32m✔ Root password updated! Next time you run 'startsql', enter this password.\033[0m\n"
-        fi
-    else
-        printf "\033[0;31m✖ Failed to update password.\033[0m\n" >&2
+        _tx_err "Failed to update the password."
         return 1
     fi
 }
 
 sqlreset() {
-    _txsql_bins
-    printf "\n\033[0;31m=========================================================\033[0m\n"
-    printf "\033[0;31m WARNING: RESET ALL MARIADB DATABASES & PASSWORDS\033[0m\n"
-    printf "\033[0;31m=========================================================\033[0m\n"
-    printf "This will PERMANENTLY DELETE all your databases and tables in:\n"
-    printf "  %s\n" "$_TX_DATADIR"
-    printf "MariaDB itself will remain installed and will be re-initialised empty.\n\n"
-    printf "Type \033[1mRESET\033[0m (in ALL CAPS) to confirm, or anything else to cancel: "
+    _tx_bins || return 1
+    printf '\n%s WARNING: this PERMANENTLY DELETES all databases and passwords in:%s\n  %s\n' "$_TX_R" "$_TX_N" "$_TX_DATADIR"
+    echo "MariaDB stays installed and is re-created empty."
+    local c=""
+    printf 'Type %sRESET%s (capitals) to confirm, anything else cancels: ' "$_TX_B" "$_TX_N"
+    IFS= read -r c
+    [ "$c" = "RESET" ] || { echo "Cancelled. No data was deleted."; return 0; }
 
-    local confirm=""
-    IFS= read -r confirm
-    if [ "$confirm" != "RESET" ]; then
-        printf "Cancelled. No data was deleted.\n"
-        return 0
-    fi
-
-    printf "\033[0;36m➤ Stopping running MariaDB processes...\033[0m\n"
-    pkill -TERM -x mariadbd 2>/dev/null || pkill -TERM -x mysqld 2>/dev/null || true
-    sleep 2
-    pkill -KILL -x mariadbd 2>/dev/null || pkill -KILL -x mysqld 2>/dev/null || true
-
-    printf "\033[0;36m➤ Removing old database directory...\033[0m\n"
-    rm -rf "$_TX_DATADIR"
-    mkdir -p "$_TX_DATADIR"
-
-    printf "\033[0;36m➤ Re-initialising fresh database...\033[0m\n"
-    if "$_TX_INIT" --user="$(whoami)" --auth-root-authentication-method=normal --datadir="$_TX_DATADIR" >/dev/null 2>&1 || \
-       "$_TX_INIT" --datadir="$_TX_DATADIR" >/dev/null 2>&1; then
-        printf "\033[0;32m✔ Database reset complete! Run 'startsql' to open your fresh SQL shell.\033[0m\n"
-    else
-        printf "\033[0;31m✖ Failed to re-initialise database.\033[0m\n" >&2
-        return 1
-    fi
+    _tx_stop_server || { _tx_err "Could not stop the server. Close Termux fully, reopen it and try again."; return 1; }
+    rm -rf "${_TX_DATADIR:?}"
+    _tx_init_db || return 1
+    _tx_ok "Database reset complete. Run 'startsql' to open a fresh SQL shell."
 }
 
 sqluninstall() {
-    _txsql_bins
-    printf "\n\033[0;31m=========================================================\033[0m\n"
-    printf "\033[0;31m WARNING: COMPLETE UNINSTALL OF TXSQL & MARIADB\033[0m\n"
-    printf "\033[0;31m=========================================================\033[0m\n"
-    printf "This will:\n"
-    printf "  1. Stop the MariaDB server\n"
-    printf "  2. PERMANENTLY DELETE all databases in %s\n" "$_TX_DATADIR"
-    printf "  3. Uninstall the MariaDB package from Termux\n"
-    printf "  4. Remove ~/.txsql.sh and clean up ~/.bashrc\n\n"
-    printf "Type \033[1mUNINSTALL\033[0m (in ALL CAPS) to confirm, or anything else to cancel: "
+    _tx_bins || return 1
+    printf '\n%s WARNING: COMPLETE UNINSTALL%s\n' "$_TX_R" "$_TX_N"
+    echo "This stops the server, DELETES all databases in $_TX_DATADIR,"
+    echo "uninstalls the MariaDB package and removes the TxSQL commands."
+    local c=""
+    printf 'Type %sUNINSTALL%s (capitals) to confirm, anything else cancels: ' "$_TX_B" "$_TX_N"
+    IFS= read -r c
+    [ "$c" = "UNINSTALL" ] || { echo "Cancelled. Nothing was removed."; return 0; }
 
-    local confirm=""
-    IFS= read -r confirm
-    if [ "$confirm" != "UNINSTALL" ]; then
-        printf "Cancelled. Nothing was removed.\n"
-        return 0
-    fi
-
-    printf "\033[0;36m➤ Stopping MariaDB processes...\033[0m\n"
-    pkill -TERM -x mariadbd 2>/dev/null || pkill -TERM -x mysqld 2>/dev/null || true
-    sleep 2
-    pkill -KILL -x mariadbd 2>/dev/null || pkill -KILL -x mysqld 2>/dev/null || true
-
-    printf "\033[0;36m➤ Uninstalling MariaDB package...\033[0m\n"
-    pkg uninstall mariadb -y </dev/null || apt-get remove --purge -y mariadb </dev/null || true
-
-    printf "\033[0;36m➤ Deleting database and configuration files...\033[0m\n"
-    rm -rf "$_TX_DATADIR" "${PREFIX}/etc/my.cnf.d" "${PREFIX}/var/run/mysqld" "$HOME/.txsql.sh"
-
-    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$rc" ]; then
-            sed -i '/\.txsql\.sh/d' "$rc" 2>/dev/null || true
-        fi
-    done
-
-    unset -f startsql stopsql sqlstatus sqlpass sqlreset sqluninstall _txsql_bins _txsql_is_running _txsql_ensure_server 2>/dev/null || true
-    printf "\033[0;32m✔ TxSQL and MariaDB have been completely uninstalled.\033[0m\n"
+    _tx_stop_server || { _tx_err "Could not stop the server. Close Termux fully, reopen it and try again."; return 1; }
+    pkg uninstall mariadb -y </dev/null || apt-get remove --purge -y mariadb </dev/null
+    rm -rf "${_TX_DATADIR:?}" "$PREFIX/var/run/mysqld" "$HOME/.txsql.sh"
+    rmdir "$PREFIX/etc/my.cnf.d" 2>/dev/null
+    [ -f "$HOME/.bashrc" ] && sed -i '/\.txsql\.sh/d' "$HOME/.bashrc"
+    unset -f startsql stopsql sqlstatus sqlpass sqlreset sqluninstall \
+        _tx_info _tx_ok _tx_warn _tx_err _tx_step _tx_bins _tx_up _tx_root_ok \
+        _tx_init_db _tx_ensure_server _tx_stop_server _tx_repair_root
+    printf '%s✔ TxSQL and MariaDB are completely uninstalled.%s\n' "$_TX_G" "$_TX_N"
 }
 EOF
-
     chmod 0644 "$TXSQL_FILE"
+    . "$TXSQL_FILE"
 
-    # Clean legacy inline startsql() block from ~/.bashrc if present from the original script
+    printf '%s=========================================================%s\n' "$_TX_C" "$_TX_N"
+    printf '%s%s  TxSQL - MariaDB Installer for Termux%s\n' "$_TX_C" "$_TX_B" "$_TX_N"
+    printf '%s=========================================================%s\n' "$_TX_C" "$_TX_N"
+
+    # ---- 1. Storage check -----------------------------------------------------
+    _tx_step "[1/4] Checking free storage..."
+    local free_kb
+    free_kb=$(df -k "$PREFIX" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt 256000 ] 2>/dev/null; then
+        _tx_warn "Only $((free_kb / 1024)) MB free. MariaDB needs about 250 MB; install may fail."
+    fi
+
+    # ---- 2. Packages ----------------------------------------------------------
+    _tx_step "[2/4] Updating packages and installing MariaDB (a few minutes)..."
+    export DEBIAN_FRONTEND=noninteractive
+    local APT=(-y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold")
+
+    if ! pkg update -y </dev/null; then
+        _tx_err "Could not update the package lists."
+        _tx_info "Check your internet, or run 'termux-change-repo' and re-run: curl -fsSL $_TX_URL | bash"
+        exit 1
+    fi
+    apt-get upgrade "${APT[@]}" </dev/null || _tx_warn "Upgrade reported an issue; installing MariaDB anyway."
+    if ! apt-get install "${APT[@]}" mariadb </dev/null; then
+        _tx_err "Could not install the 'mariadb' package."
+        _tx_info "Run 'termux-change-repo', then re-run: curl -fsSL $_TX_URL | bash"
+        exit 1
+    fi
+    # pkill is needed by stopsql/sqlreset as a fallback; not fatal if missing
+    command -v pkill >/dev/null 2>&1 || apt-get install "${APT[@]}" procps </dev/null >/dev/null 2>&1 \
+        || _tx_warn "Could not install 'procps' (optional)."
+
+    # ---- 3. Database ----------------------------------------------------------
+    _tx_step "[3/4] Preparing the database..."
+    _tx_bins || exit 1
+    if [ -d "$_TX_DATADIR/mysql" ]; then
+        _tx_info "Existing database found at $_TX_DATADIR (all data preserved)."
+    else
+        _tx_info "Creating a fresh database..."
+        _tx_init_db || exit 1
+        _tx_ok "Database created."
+    fi
+
+    # ---- 4. Server check, root repair, shell setup ----------------------------
+    _tx_step "[4/4] Starting the server and checking root login..."
+    _tx_ensure_server || exit 1
+    if _tx_repair_root; then
+        _tx_info "Root login is ready (no password set). Add one any time with: sqlpass"
+    else
+        _tx_info "Root is protected by your existing password (kept unchanged)."
+    fi
+
     touch "$BASHRC"
     if grep -q "^startsql()" "$BASHRC" 2>/dev/null; then
         cp "$BASHRC" "${BASHRC}.txsql.bak"
-        info "Backed up ~/.bashrc to ~/.bashrc.txsql.bak and upgraded legacy inline startsql() block."
-        awk '
-            /^startsql\(\)[[:space:]]*\{/ { in_block=1; next }
-            in_block && /^\}/ { in_block=0; next }
-            !in_block { print }
-        ' "${BASHRC}.txsql.bak" > "$BASHRC"
+        _tx_info "Old startsql() found; backup saved as ~/.bashrc.txsql.bak"
+        awk '/^startsql\(\)[[:space:]]*\{/ {skip=1; next} skip && /^\}/ {skip=0; next} !skip {print}' \
+            "${BASHRC}.txsql.bak" > "$BASHRC"
     fi
+    grep -Fq ".txsql.sh" "$BASHRC" 2>/dev/null \
+        || printf '\n# TxSQL helper commands\n[ -f "$HOME/.txsql.sh" ] && . "$HOME/.txsql.sh"\n' >> "$BASHRC"
 
-    # Ensure ~/.txsql.sh is sourced in ~/.bashrc (and ~/.zshrc if the user installed zsh)
-    local SOURCE_LINE='[ -f "$HOME/.txsql.sh" ] && . "$HOME/.txsql.sh"'
-    if ! grep -Fq ".txsql.sh" "$BASHRC" 2>/dev/null; then
-        printf "\n# TxSQL (SquillMux) helper commands\n%s\n" "$SOURCE_LINE" >> "$BASHRC"
-    fi
-    if [ -f "$HOME/.zshrc" ] && ! grep -Fq ".txsql.sh" "$HOME/.zshrc" 2>/dev/null; then
-        printf "\n# TxSQL (SquillMux) helper commands\n%s\n" "$SOURCE_LINE" >> "$HOME/.zshrc"
-    fi
-
-    printf "\n${CYAN}=========================================================${NC}\n"
-    printf "${GREEN}${BOLD}✔ TxSQL Installation Complete!${NC}\n"
-    printf "${CYAN}=========================================================${NC}\n"
-    printf "Next steps:\n"
-    printf "  1. Activate commands now : ${BOLD}source ~/.bashrc${NC}\n"
-    printf "  2. Open MariaDB shell    : ${BOLD}startsql${NC}\n\n"
-    printf "Extra commands available anytime at the Termux prompt (~ $):\n"
-    printf "  • ${BOLD}startsql${NC}     - Start server (if stopped) and open MariaDB shell\n"
-    printf "  • ${BOLD}sqlpass${NC}      - Set, change, or remove the MariaDB root password\n"
-    printf "  • ${BOLD}stopsql${NC}      - Stop the background MariaDB server\n"
-    printf "  • ${BOLD}sqlstatus${NC}    - Check if MariaDB server is running\n"
-    printf "  • ${BOLD}sqlreset${NC}     - Wipe all databases & reset password (asks confirmation)\n"
-    printf "  • ${BOLD}sqluninstall${NC} - Completely remove MariaDB, data & TxSQL\n"
-    printf "${CYAN}=========================================================${NC}\n"
+    printf '\n%s=========================================================%s\n' "$_TX_C" "$_TX_N"
+    printf '%s%s✔ TxSQL installation complete!%s\n' "$_TX_G" "$_TX_B" "$_TX_N"
+    printf '%s=========================================================%s\n' "$_TX_C" "$_TX_N"
+    printf '1. Activate the commands : %ssource ~/.bashrc%s  (or restart Termux)\n' "$_TX_B" "$_TX_N"
+    printf '2. Open the SQL shell    : %sstartsql%s\n\n' "$_TX_B" "$_TX_N"
+    printf 'Type these at the Termux prompt (~ $), not inside SQL:\n'
+    printf '  %sstartsql%s     start server + open SQL shell\n' "$_TX_B" "$_TX_N"
+    printf '  %ssqlpass%s      set, change or remove the root password\n' "$_TX_B" "$_TX_N"
+    printf '  %sstopsql%s      stop the server\n' "$_TX_B" "$_TX_N"
+    printf '  %ssqlstatus%s    is the server running?\n' "$_TX_B" "$_TX_N"
+    printf '  %ssqlreset%s     delete all databases, start fresh (asks first)\n' "$_TX_B" "$_TX_N"
+    printf '  %ssqluninstall%s remove MariaDB, data and TxSQL (asks first)\n' "$_TX_B" "$_TX_N"
 }
 
 txsql_install_main "$@"
